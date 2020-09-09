@@ -1,0 +1,494 @@
+#! /bin/sh
+# the next line restarts using tree_wish \
+exec tree_wish "$0" ${1+"$@"}
+
+#
+#/*
+# * ----------------------------------------------------------------------
+# *
+# * This file is part of the MemTrace package
+# * (w) 1999 Frank Pilhofer
+# *
+# * ----------------------------------------------------------------------
+# */
+#
+#
+# 42 bytes allocated by f  (leak.c:21)
+#        called by main  (leak.c:42)
+#        called by _init
+#
+
+proc scantrace {file} {
+    global curline
+
+    if {[regexp {(^[0-9]+) bytes allocated by *(.*)(\(([^\)]+)\))$} \
+	    $curline dummy bytes proc d2 loc] != 1} {
+	if {[regexp {(^[0-9]+) bytes allocated by *(.*)$} \
+		$curline dummy bytes proc] != 1} {
+	    gets $file curline
+	    return
+	}
+	set loc $proc
+    }
+
+    set proc [string trim $proc]
+    set loc [string trim $loc]
+
+    catch {unset item}
+    lappend item [list $loc $proc]
+
+    gets $file curline
+
+    while {![eof $file] && [regexp {called by} $curline]} {
+	if {[regexp {called by *(.*)(\(([^\)]+)\))$} \
+		$curline dummy proc d2 loc] != 1} {
+	    regexp {called by *(.*)$} $curline dummy proc
+	    set loc $proc
+	}
+	set proc [string trim $proc]
+	set loc [string trim $loc]
+	lappend item [list $loc $proc]
+	gets $file curline
+    }
+
+    return [list $bytes $item]
+}
+
+proc scanreport {file length} {
+    global curline status
+
+    set status "Searching ..."
+    update
+
+    gets $file curline
+
+    while {![eof $file] && ![regexp {^#### Memory Usage Report$} $curline]} {
+	gets $file curline
+    }
+
+    if {[eof $file]} {
+	error "no report found"
+    }
+
+    gets $file curline
+
+    set report ""
+    while {![eof $file] && ![regexp {^####} $curline]} {
+	lappend report [scantrace $file]
+	if {[pid $file] == {}} {
+	    set where [tell $file]
+	    set status "Loading ... [expr $where * 100 / $length]%"
+	} else {
+	    if {[catch {set counter}]} {set counter 0}
+	    incr counter
+	    if {[expr $counter % 50] == 0} {
+		set status "Loading ... $counter"
+	    }
+	}
+	update
+    }
+
+    return $report
+}
+
+#
+# tree: {name allocs totalsize children}
+# trace: {{location function} ...}
+#
+
+proc addnode {tree bytes trace} {
+    global functions
+
+    if {$trace == ""} {
+	return $tree
+    }
+
+    set found -1
+    set name [lindex [lindex $trace 0] 0]
+    for {set i 0} {$i < [llength $tree]} {incr i} {
+	if {[lindex [lindex $tree $i] 0] == $name} {
+	    set found $i
+	    break
+	}
+    }
+
+    if {$found != -1} {
+	set branch [lindex $tree $found]
+	set allocs [lindex $branch 1]
+	set size   [lindex $branch 2]
+	set children [lindex $branch 3]
+
+	incr allocs
+	set size [expr $size + $bytes]
+	set children [addnode $children $bytes [lrange $trace 1 end]]
+	set children [lsort -index 1 -integer -decreasing $children]
+
+	set newbranch [list $name $allocs $size $children]
+	set tree [lreplace $tree $found $found $newbranch]
+    } else {
+	set func [lindex [lindex $trace 0] 1]
+	set functions($name) $func
+	set branch [addnode {} $bytes [lrange $trace 1 end]]
+	lappend tree [list $name 1 $bytes $branch]
+    }
+
+    return $tree
+}
+
+proc buildtree {report} {
+    global status
+    set tree ""
+    set length [llength $report]
+    set counter 0
+    foreach item $report {
+	set bytes [lindex $item 0]
+	set trace [lindex $item 1]
+	set tree [addnode $tree $bytes $trace]
+	incr counter
+	if {[expr $counter % 50] == 0} {
+	    set status "Building Trace Tree ... [expr $where * 100 / $length]%"
+	    update
+	}
+    }
+    set tree [lsort -index 1 -integer -decreasing $tree]
+    return $tree
+}
+
+#
+# path: list of locations
+#
+
+proc findbranch {tree path} {
+    #
+    # First level is a linear list
+    #
+
+    if {[llength $path] > 0} {
+	set name [lindex $path 0]
+	foreach item $tree {
+	    if {[lindex $item 0] == $name} {
+		set tree $item
+		break
+	    }
+	}
+	set path [lrange $path 1 end]
+    }
+
+    while {[llength $path] > 0} {
+	set name [lindex $path 0]
+	foreach item [lindex $tree 3] {
+	    if {[lindex $item 0] == $name} {
+		set tree $item
+		break
+	    }
+	}
+	set path [lrange $path 1 end]
+    }
+    return $tree
+}
+
+#
+# visualization
+#
+
+proc MakeCanvas {frame} {
+    frame $frame.top
+    frame $frame.bot
+
+    scrollbar $frame.top.vscroll -command "$frame.top.canvas yview"
+    scrollbar $frame.bot.hscroll -command "$frame.top.canvas xview" \
+	    -orient horizontal
+    canvas $frame.top.canvas \
+	    -xscrollcommand "$frame.bot.hscroll set" \
+	    -yscrollcommand "$frame.top.vscroll set"
+    frame $frame.bot.dum \
+	    -width [expr [lindex [$frame.top.vscroll configure -width] 4] + \
+	    2 * [lindex [$frame.top.vscroll configure -borderwidth] 4] + \
+	    [lindex [$frame.top.canvas configure -borderwidth] 4]] \
+	    -height [expr [lindex [$frame.bot.hscroll configure -width] 4] + \
+	    2 * [lindex [$frame.bot.hscroll configure -borderwidth] 4]]
+
+    pack $frame.top.vscroll -side right -fill y
+    pack $frame.top.canvas -fill both -expand 1
+    pack $frame.bot.dum -side right
+    pack $frame.bot.hscroll -side bottom -fill x
+
+    pack $frame.bot -side bottom -fill x
+    pack $frame.top -side top -fill both -expand 1
+
+    bind $frame.top.canvas <ButtonPress-2> "$frame.top.canvas scan mark %x %y"
+    bind $frame.top.canvas <B2-Motion> "$frame.top.canvas scan dragto %x %y"
+    return $frame.top.canvas
+}
+
+proc AddNode {canvas tree parent branch path} {
+    set t1 [lindex $branch 0]
+    set t2 "[lindex $branch 1] [lindex $branch 2]"
+    $canvas create text 0 0 -text $t1 -tags [list $path $path-t1]
+    $canvas create text 0 0 -text $t2 -tags [list $path $path-t2]
+    set line [$canvas create line 0 0 0 0]
+    LayoutNode $canvas $tree $path
+    $tree addlink $parent $path $line -border 2m
+}
+
+proc LayoutNode {canvas tree path} {
+    scan [$canvas bbox $path-t1] "%d %d %d %d" x1 y1 x2 y2
+    $canvas itemconfigure $path-t2 -anchor n
+    $canvas coords $path-t2 [expr ($x1+$x2)/2] $y2
+}
+
+proc SelectNode {canvas} {
+    global functions status
+    $canvas select from current 0
+    $canvas select to current [string length [$canvas itemcget current -text]]
+    if {[GetPath $canvas] != ""} {
+	set path [split [GetPath $canvas] /]
+	set loc [lindex $path [expr [llength $path] - 1]]
+	if {[info exists functions($loc)]} {
+	    set status $functions($loc)
+	} else {
+	    set status ""
+	}
+    }
+}
+
+proc DeSelectNode {canvas} {
+    global status
+    $canvas select clear
+    set status ""
+}
+
+proc GetPath {canvas} {
+    set id [$canvas select item]
+    if {$id == ""} {
+	return [lindex [$canvas gettags selected] 0]
+    }
+    return [lindex [$canvas gettags $id] 0]
+}
+
+proc AddTopLevel {canvas tree} {
+    global report threshold
+    foreach item $report {
+	set name [lindex $item 0]
+	set allocs [lindex $item 1]
+	if {$allocs > $threshold} {
+	    AddNode $canvas $tree RootNode $item $name
+	}
+    }
+}
+
+proc ToggleChildren {canvas tree} {
+    global report threshold
+
+    set path [GetPath $canvas]
+    set branch [findbranch $report [split $path /]]
+
+    if {[$tree isleaf $path]} {
+	set children [lindex $branch 3]
+	if {$path == "RootNode"} {
+	    AddTopLevel $canvas $tree
+	    return
+	}
+	foreach node $children {
+	    set name [lindex $node 0]
+	    set allocs [lindex $node 1]
+	    if {$allocs > $threshold} {
+		AddNode $canvas $tree $path $node $path/$name
+	    }
+	}
+    } else {
+	$tree prune $path
+    }
+}
+
+proc ExpandAll {canvas tree {path {}}} {
+    global report threshold
+
+    if {$path == ""} {
+	set path [GetPath $canvas]
+    }
+
+    set branch [findbranch $report [split $path /]]
+    set children [lindex $branch 3]
+    if {[$tree isleaf $path]} {
+	set isleaf 1
+    } else {
+	set isleaf 0
+    }
+
+    if {$path == "RootNode"} {
+	foreach item $report {
+	    set name [lindex $item 0]
+	    set allocs [lindex $item 1]
+	    if {$allocs > $threshold} {
+		if {$isleaf} {
+		    AddNode $canvas $tree RootNode $item $name
+		}
+		ExpandAll $canvas $tree $name
+	    }
+	}
+    } else {
+	foreach node $children {
+	    set name [lindex $node 0]
+	    set allocs [lindex $node 1]
+	    if {$allocs > $threshold} {
+		if {$isleaf} {
+		    AddNode $canvas $tree $path $node $path/$name
+		}
+		ExpandAll $canvas $tree $path/$name
+	    }
+	}
+    }
+}
+
+proc CutNode {canvas tree} {
+    set path [GetPath $canvas]
+    if {$path != "RootNode"} {
+	$tree rmlink $path
+    }
+}
+
+proc CutSiblings {canvas tree} {
+    set path [GetPath $canvas]
+
+    if {$path != "RootNode"} {
+	set parent [$tree parent $path]
+	foreach sib [$tree subnodes $parent] {
+	    if {$sib != $path} {
+		$tree rmlink $path
+	    }
+	}
+    }
+}
+
+proc MakeRoot {canvas tree} {
+    set allocs 0
+    set bytes 0
+    global report
+    foreach item $report {
+	set allocs [expr $allocs + [lindex $item 1]]
+	set bytes [expr $bytes + [lindex $item 2]]
+    }
+    set t1 "All"
+    set t2 "$allocs $bytes"
+    $canvas create text 0 0 -text $t1 -tags [list RootNode RootNode-t1]
+    $canvas create text 0 0 -text $t2 -tags [list RootNode RootNode-t2]
+    set line [$canvas create line 0 0 0 0]
+    LayoutNode $canvas $tree RootNode
+    $tree addlink {} RootNode $line -border 2m
+}
+
+#
+# main
+#
+
+proc Setup {} {
+    global canvas tree status threshold filter
+
+    wm geometry . 600x480
+
+    set status ""
+    set threshold 0
+    set filter 0
+
+    menu .mainMenu -tearoff 0
+    menu .mainMenu.file -tearoff 0
+    menu .mainMenu.opts -tearoff 0
+    .mainMenu add cascade -label "File" -menu .mainMenu.file -underline 0
+    .mainMenu.file add command -label "Load" \
+	    -command "OpenReport \[tk_getOpenFile\]" -underline 0
+    .mainMenu.file add command -label "Exit" \
+	    -command "destroy ." -underline 0
+    .mainMenu add cascade -label "Options" -menu .mainMenu.opts \
+	    -underline 0
+    .mainMenu.opts add command -label "Threshold" \
+	    -command "SetThreshold" -underline 0
+    .mainMenu.opts add checkbutton -label "Run c++filt" \
+	    -variable filter -underline 0
+    . configure -menu .mainMenu
+    
+    frame .status
+    label .status.label -textvariable status -relief sunken -bd 1 -anchor w
+    pack .status.label -side left -padx 2 -expand yes -fill both
+    pack .status -side bottom -fill x -pady 2
+    
+    frame .canvas
+    set canvas [MakeCanvas .canvas]
+    set tree [tree $canvas.tree -layout horizontal]
+    pack .canvas -fill both -expand 1
+
+    menu .context -tearoff 0
+    .context add command -label "Expand All" -command "ExpandAll $canvas $tree"
+    .context add command -label "Cut Node" -command "CutNode $canvas $tree"
+    .context add command -label "Cut Siblings" \
+	    -command "CutSiblings $canvas $tree"
+    
+    $canvas bind all <1> "focus %W; SelectNode $canvas"
+    $canvas bind all <Double-1> "ToggleChildren $canvas $tree"
+    $canvas bind all <3> "focus %W; SelectNode $canvas; tk_popup .context %X %Y"
+}
+
+proc OpenReport {fname} {
+    global canvas tree
+    global report filter
+    global status
+
+    if {[catch {
+	set length [file size $fname]
+	if {$filter != 0} {
+	    set file [open "|c++filt < $fname"]
+	} else {
+	    set file [open $fname]
+	}
+    }]} {
+	tk_dialog .dialog {Oops} \
+		"Error reading file $fname." \
+		warning 0 OK
+	return
+    }
+    if {[catch {set newdata [scanreport $file $length]}]} {
+	tk_dialog .dialog {No Report Found} \
+		"The file $fname does not contain any MemTrace report." \
+		warning 0 OK
+	close $file
+	return
+    }
+    if {$newdata == ""} {
+	tk_dialog .dialog {Empty Report} \
+		"The file $fname does contain an MemTrace report,\
+		but no memory leaks were found." \
+		warning 0 OK
+	close $file
+	return
+    }
+
+    set data $newdata
+    set report [buildtree $data]
+    close $file
+
+    $tree prune {}
+    MakeRoot $canvas $tree
+    set status "Ready"
+}
+
+proc SetThreshold {} {
+    global threshold wait
+
+    toplevel .options
+    wm title .options "Set Threshold Value"
+    label .options.lab -text "Enter Threshold Value"
+    entry .options.entry -textvariable threshold
+    pack .options.lab .options.entry
+    bind .options.entry <Return> "set wait 1"
+    vwait wait
+    destroy .options
+}
+
+if {![info exists canvas]} {
+    Setup
+}
+
+if {$argv != {}} {
+    OpenReport [lindex $argv 0]
+    set status "Ready"
+}

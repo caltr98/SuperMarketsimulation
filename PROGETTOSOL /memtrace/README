@@ -1,0 +1,338 @@
+
+----------------------------------------------------------------------
+Checking for Memory Leaks with MemTrace
+----------------------------------------------------------------------
+
+This package can be used to search for memory leaks in your program.
+It contains replacement functions for malloc() and free(). What makes
+this package different is that it uses platform-specific features to
+record a stack trace each time a memory chunk is allocated. Therefore,
+it can report precisely where a memory leak occured.
+
+Unfortunately, this means that MemTrace is rather system dependant and
+may be impossible to use on any other platforms than the tested ones
+(see Porting Notes below):
+
+ - Linux/x86 (tested with Linux 2.0.3x using both libc5 and glibc)
+ - SunOS/Sparc using gcc/egcs
+ - AIX/PPC or RS6000 using gcc/egcs (no shared libraries)
+
+One problem remains on SunOS/Sparc: sometimes, shared libraries are
+not handled properly for unknown reasons. If symbols in shared
+libraries are not resolved properly, use static linking.
+
+The package contains lots of borrowed code from glibc, binutils and
+gdb. Consequently, MemTrace itself is placed under the GNU General
+Public License (GPL), too.
+
+It requires binutils to be installed. More specifically, it needs the
+include file <bfd.h> and the -lbfd library from the GNU binutils
+package (available from GNU mirror sites). The -liberty library is
+also needed, but it is usually installed along with gcc.
+
+
+Compiling:
+----------
+
+MemTrace is distributed as a source file, memtrace.c, plus a header
+file, memtrace.h. You must compile the source file and link it into
+your application. If not installed in a standard location, you must
+add the proper `-I/where/ever' option to point to the <bfd.h> include
+file when compiling memtrace.c
+
+When linking, add `-lbfd -liberty'.
+
+*Important* MemTrace relies on frame pointers, so you must compile
+every source file of your project with the `-fno-omit-frame-pointer'
+option. (Actually, that option should be turned on by default unless
+you use -fomit-frame-pointer.)
+
+Of course, you must also enable debugging information with `-g'. You
+can also use limited debugging information with `-g1', which makes for
+much smaller object files. However, `-g1' does not produce line number
+information; MemTrace will still be able to print function names, but
+no line numbers.
+
+When using optimization `-O', reported line numbers may be skewed.
+
+
+Using:
+------
+
+Two functions are provided, MemTrace_Malloc() and MemTrace_Free(), that
+must be used instead of the normal malloc() and free(). In C code, you
+would usually add
+
+#define malloc MemTrace_Malloc
+#define free MemTrace_Free
+
+to accomplish this without changing any of your code. At best, place
+these lines into some header file that is read by all of your source
+files.
+
+Then, there is a small administrative interface to MemTrace:
+
+int  MemTrace_Init (const char * argv0, int options)
+
+	Must be called at some point to initialize internal data
+	structures and symbol tables. The first parameter, `argv0',
+	must be the name to the currently runing executable. It must
+	be either the full pathname or searchable via PATH. A zero
+	return value denotes success.
+
+	The options are discussed below.
+
+	Actually, memory allocations are already logged before this
+	function is called.
+
+int  MemTrace_Options (int options_to_set, int options_to_unset)
+
+	Changes the options set with MemTrace_Init(). Options in the
+	first argument are set, the ones given in the second parameter
+	are removed from the option set. The old options are returned.
+
+void MemTrace_Report (FILE * out)
+
+	Produces a report of the currently allocated chunks of memory
+	and sends it to the given stream (for example, stderr). For
+	each chunk, a stack trace is printed which execution path led
+	to the allocation.
+
+void MemTrace_Flush (void)
+
+	Makes MemTrace forget which chunks of memory are currently
+	in use -- these chunks will not be reported afterwards. This
+	is useful if you initialize certain data structures that are
+	knowingly never released. Call MemTrace_Flush() after
+	allocating them, and they won't clutter your output.
+
+void MemTrace_SelfTrace (FILE * out)
+
+	Records a stack trace of the current execution path and prints
+	it to the given stream (for example, stderr). This may be use-
+	ful to trace a program, or just before an assert().
+
+int  MemTrace_CheckPtr (void * base, void * ptr, int fail)
+
+	Verify that ptr points into allocated memory. If base is non-
+	NULL, it is a base pointer to an allocated region as returned
+	from MemTrace_Malloc() that ptr is supposed to be contained in.
+
+	If a NULL value is given as base pointer, all currently recorded
+	memory allocations are checked whether ptr is contained in any
+	of them. This is useful in code that doesn't know the particular
+	base pointer, but is (a) much weaker, because runaway pointers
+	that left their intended memory region and entered another
+	properly allocated region are not caught, and (b) an error may
+	be reported even if ptr is correct, but the allocation infor-
+	mation for the region that contains ptr was forgotten about
+	using MemTrace_Flush().
+
+	If the fail parameter is zero, the function returns true (non-
+	zero) if ptr is thought to be `correct' and false (zero) in case
+	ptr is found to be `incorrect' and thus should not be read.
+
+	If the fail parameter is non-zero, the function always returns
+	successfully with a non-zero return value. If ptr is found to
+	be incorrect, a message and a stack trace are printed, and the
+	program exits.
+
+	Note that a null value for ptr is also considered invalid.
+
+void MemTrace_AssertPtr (void * ptr)
+
+	A shortcut for MemTrace_CheckPtr (NULL, ptr, 1). See the
+	discussion above.
+
+
+Note that usually, the only necessary change to your code is the call
+to MemTrace_Init() at the beginning of your program and the redefi-
+nition of malloc() and free(). The other functions aren't necessary
+for basic operation -- but they become useful for a finer-grained
+examination of what's going wrong.
+
+
+Options:
+--------
+
+The following options can be or'ed and passed to MemTrace_Init and
+MemTrace_Options.
+
+MEMTRACE_REPORT_ON_EXIT
+
+	Registers an exit handler with atexit(), so that MemTrace_Report
+	is called when your program exits, reporting all chunks of
+	memory that were left behind.
+
+MEMTRACE_FULL_FILENAMES
+
+	Usually, when reporting the location of a symbol within a source
+	file, the path name is truncated from the file name, and only the
+	source file's base name is printed. Use this option to receive
+	the full path name to the source file. (Useful if you have more
+	than one file of the same name in your project.)
+
+MEMTRACE_NO_INVALIDATE_MEMORY
+
+	Usually, MemTrace initializes newly-allocated memory and freshly-
+	reclaimed memory with a bit pattern. The idea is that if your
+	program accesses uninitialized memory or accesses memory after
+	it has been released, it's better if it doesn't find leftover
+	'legal' data or 'pseudo-legal' null values, so that such
+	illegal behaviour is spotted as early as possible.
+
+	Use this option to disable memory initialization -- this will
+	slightly speed up calls to MemTrace_Malloc() and MemTrace_Free()
+
+MEMTRACE_IGNORE_ALLOCATIONS
+
+	With MemTrace_Flush(), you can forget all about previously
+	allocated regions. By setting and unsetting this options, you
+	can selectively turn on and off the recording of memory allo-
+	cations. Example:
+
+	  MemTrace_Options (MEMTRACE_IGNORE_ALLOCATIONS, 0);
+	  malloc (42);
+	  MemTrace_Options (0, MEMTRACE_IGNORE_ALLOCATIONS);
+
+	In this example, the allocation would not be reported as a
+	leak. The options is useful to selectively ignore particular
+	allocations that are knowingly never released.
+
+
+C++ Code:
+---------
+
+Another source file, memtrace++.cc is provided, that overloads the global
+new and delete operators to use MemTrace's malloc and free replacements.
+Just compiling and linking this to your application enables MemTrace,
+without the #define's that were necessary with C. But, of course you must
+still call MemTrace_Init() and trigger reports manually.
+
+Function names are printed in their mangled form. Filter the output through
+`c++filt' (also comes with binutils) to retrieve true C++ names. For
+example, if you're printing your reports to stderr, you can do (using
+bourne shell):
+
+  ./program 2>&1 > /dev/null | c++filt
+
+For memory allocations in a template, the function name seems to correspond
+to the callee. The reported file name and line number seems to be correct,
+though.
+
+Unresolved problem: How do you arrange that a report is generated after all
+other global destructors? Otherwise you see all memory allocated in global
+objects that are about to be destructed.
+
+
+Viewtrace:
+----------
+
+In this package you'll also find the small but effective utility viewtrace.
+It reads in a MemTrace report from a file and displays the results graphi-
+cally.
+
+The idea is that memory leaks usually originate in functions located deeply
+in your call tree, for example in a helper function which allocates members
+of a structure. When such a function is called from other functions, the
+memory leak "forks off" in many directions.
+
+Viewtrace displays a reverse call tree, with the root being MemTrace's
+allocator functions, so the top-level nodes are the functions where a
+memory leak originated, and their children are the upward call frames
+-- in many cases, it's not the allocator code that is buggy, but some
+other code that was supposed to release the memory. By walking the tree,
+you can check the code for each call frame.
+
+At first, only the root node is shown. Each node is shown with the code
+location (file name and line number), the total of memory leaks originating
+at that node, and the number of bytes leaked. Double-clicking on a node
+displays the node's children or collapses the branch. When single-clicking
+on a node, the status line at the bottom shows the associated function
+name.
+
+Another observation is that memory leaks are reproductible: usually, you'll
+notice that your program grows (from the output of top or ps) when executing
+some loop. This results in the same memory leak occuring multiple times.
+Finding such a loop is easy in comparison to finding the actual leak. Here,
+viewtrace is very handy too, compared to MemTrace's output, which would be
+a hard-to-inspect, lengthy report of many identical traces.
+
+The key is viewtrace's "threshold" option value, which you can set from the
+options menu. It causes all nodes and branches with less than "threshold"
+associated memory leaks not to be displayed. The value is zero by default,
+so you see the complete tree. The first idea would be to set the value to
+1, so that you don't see memory allocated for your global symbols.
+
+However, if you know a loop that contains a memory leak, you can just pro-
+gram the loop to go around a hundred times. Then, you set the threshold
+value to 100, load your lengthy report, and the only branch you'll see is
+the one containing the leak. Just as I said before -- viewtrace is simple
+but effective.
+
+The threshold option does only take effect for newly expanded branches.
+
+Viewtrace is actually a Tcl/Tk program. It requires "tree_wish", which
+is Tcl/Tk plus Allan Brighton's Tree widget. Tcl/Tk is available from
+http://www.scriptics.org/, the tree widget is available from
+ftp://ftp.archive.eso.org/pub/tree. I have tested viewtrace with
+version 8.0.3 of all packages.
+
+
+Efficiency:
+-----------
+
+The memory footprint and performance impact should be comfortably small.
+For each call to MemTrace_Malloc(), approximately 100 additional bytes are
+used to record a stack trace and related information. This data is stored
+in a linear list. Performance of MemTrace_Malloc() is thus linear with the
+number of currently allocated memory regions, performance of MemTrace_Free()
+is constant. So unless you're working with very many very small chunks of
+memory (in which case you should think of using more efficient mechanisms
+yourself anyway), you probably won't notice MemTrace.
+
+
+Porting Notes:
+--------------
+
+MemTrace consists of three parts that must be ported individually. The first
+part is the code to access the symbol table, to resolve a memory address
+into a source location. This code is taken from GNU binutils and depends on
+binutil's bfd library, so it should work everywhere where binutils has been
+ported to.
+
+The second part is the shared library stuff, which has been taken from GNU
+gdb. It is necessary to access symbol names for code from shared libraries
+-- it must detect which shared libraries are loaded, where they have been
+mapped to, and then read their symbol table, again using the bfd library.
+The existing code should work on ELF systems (tested on Linux and SunOS).
+The nice part is that it can be simply switched off at first: you will
+then not be able to resolve symbols from shared libraries and must link
+your own libraries statically.
+
+The third part is the hairiest: you must implement the backtrace() function
+that fills in a pointer array with addresses from the call stack.
+
+
+Comments:
+---------
+
+I am not responsible for much of the code in MemTrace. Rather, I was more
+the one putting existing pieces together to accomplish something useful.
+Actually, I do not have a deep understanding of the "stolen" code, I just
+managed to put the pieces into shape so that they worked as expected. If
+MemTrace doesn't work for you or if you have specific questions, chances
+are that I won't be able to help.
+
+The package works quite well for me, and I might be expanding MemTrace if
+I ever see the need, but I do not have the time or resources to make it
+fulfill everyone's wishes. If you think MemTrace needs improvement or
+porting to other environments, hack the code and send me a patch.
+
+Thanks to the folks on the egcs mailing list for guiding me in the right
+directions, and particularly to Steve Coleman for contributing the
+backtrace() code for SunOS/Sparc.
+
+----------------------------------------------------------------------
+Frank Pilhofer
+fp@informatik.uni-frankfurt.de
